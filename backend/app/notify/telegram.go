@@ -143,6 +143,11 @@ func (t *Telegram) Send(ctx context.Context, req request) error {
 	return nil
 }
 
+// SendVerification does nothing for Telegram
+func (t *Telegram) SendVerification(ctx context.Context, req VerificationRequest) error {
+	return nil
+}
+
 func (t *Telegram) String() string {
 	return "telegram: " + t.channelID
 }

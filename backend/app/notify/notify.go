@@ -14,9 +14,10 @@ import (
 
 // Service delivers notifications to multiple destinations
 type Service struct {
-	dataService  Store
-	destinations []Destination
-	queue        chan request
+	dataService       Store
+	destinations      []Destination
+	msgQueue          chan request
+	verificationQueue chan VerificationRequest
 
 	closed uint32 // non-zero means closed. uses uint instead of bool for atomic
 	ctx    context.Context
@@ -27,6 +28,7 @@ type Service struct {
 type Destination interface {
 	fmt.Stringer
 	Send(ctx context.Context, req request) error
+	SendVerification(ctx context.Context, req VerificationRequest) error
 }
 
 type VerificationRequest struct {
@@ -58,16 +60,17 @@ func NewService(dataService Store, size int, destinations ...Destination) *Servi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	res := Service{
-		dataService:  dataService,
-		queue:        make(chan request, size),
-		destinations: destinations,
-		ctx:          ctx,
-		cancel:       cancel,
+		dataService:       dataService,
+		msgQueue:          make(chan request, size),
+		verificationQueue: make(chan VerificationRequest, size),
+		destinations:      destinations,
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 	if len(destinations) > 0 {
 		go res.do()
 	}
-	log.Printf("[INFO] create notifier service, queue size=%d, destinations=%d", size, len(destinations))
+	log.Printf("[INFO] create notifier service, msgQueue size=%d, destinations=%d", size, len(destinations))
 	return &res
 }
 
@@ -87,31 +90,59 @@ func (s *Service) Submit(comment store.Comment) {
 		}
 	}
 	select {
-	case s.queue <- request{comment: comment, parent: parentComment, parentUserEmail: email}:
+	case s.msgQueue <- request{comment: comment, parent: parentComment, parentUserEmail: email}:
 	default:
-		log.Printf("[WARN] can't send comment notification to queue, %+v", comment)
+		log.Printf("[WARN] can't send comment notification to msgQueue, %+v", comment)
 	}
 }
 
-// Close queue channel and wait for completion
+// SubmitVerification to internal channel if not busy, drop if can't send
+func (s *Service) SubmitVerification(req VerificationRequest) {
+	if len(s.destinations) == 0 || atomic.LoadUint32(&s.closed) != 0 {
+		return
+	}
+	select {
+	case s.verificationQueue <- req:
+	default:
+		log.Printf("[WARN] can't send verification message to verificationQueue for user %s", req.User)
+	}
+}
+
+// Close msgQueue channel and wait for completion
 func (s *Service) Close() {
-	if s.queue != nil {
-		log.Print("[DEBUG] close notifier")
-		close(s.queue)
+	log.Print("[DEBUG] close notifier")
+	if s.msgQueue != nil {
+		close(s.msgQueue)
 		s.cancel()
 		<-s.ctx.Done()
+	}
+	if s.verificationQueue != nil {
+		close(s.verificationQueue)
 	}
 	atomic.StoreUint32(&s.closed, 1)
 }
 
 func (s *Service) do() {
-	for c := range s.queue {
+	for c := range s.msgQueue {
 		var wg sync.WaitGroup
 		wg.Add(len(s.destinations))
 		for _, dest := range s.destinations {
 			go func(d Destination) {
 				if err := d.Send(s.ctx, c); err != nil {
 					log.Printf("[WARN] failed to send to %s, %s", d, err)
+				}
+				wg.Done()
+			}(dest)
+		}
+		wg.Wait()
+	}
+	for c := range s.verificationQueue {
+		var wg sync.WaitGroup
+		wg.Add(len(s.destinations))
+		for _, dest := range s.destinations {
+			go func(d Destination) {
+				if err := d.SendVerification(s.ctx, c); err != nil {
+					log.Printf("[WARN] failed to send verification to %s, %s", d, err)
 				}
 				wg.Done()
 			}(dest)

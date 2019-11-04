@@ -135,6 +135,10 @@ func (m *mockDest) Send(ctx context.Context, r request) error {
 	return nil
 }
 
+func (m *mockDest) SendVerification(ctx context.Context, r VerificationRequest) error {
+	return nil
+}
+
 func (m *mockDest) get() []request {
 	m.lock.Lock()
 	defer m.lock.Unlock()
