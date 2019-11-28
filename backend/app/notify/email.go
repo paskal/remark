@@ -37,7 +37,9 @@ type EmailParams struct {
 // Email implements notify.Destination for email
 type Email struct {
 	EmailParams
-	smtpClient // initialized only on sending, closed afterwards
+	smtpClient // initialised only in tests,
+	// in normal situation make new smtpClient for every batch sending
+	// and close it without storing in the Email.
 
 	msgTmpl    *template.Template // parsed request message template
 	verifyTmpl *template.Template // parsed verification message template
@@ -133,13 +135,13 @@ func NewEmail(params EmailParams) (*Email, error) {
 	}
 
 	// establish test connection
-	res.smtpClient, err = res.client()
+	testSmtpClient, err := res.client()
 	if err != nil {
 		return &res, errors.Wrapf(err, "can't establish test connection")
 	}
-	if err = res.smtpClient.Quit(); err != nil {
+	if err = testSmtpClient.Quit(); err != nil {
 		log.Printf("[WARN] failed to send quit command to %s:%d, %v", res.Host, res.Port, err)
-		if err = res.smtpClient.Close(); err != nil {
+		if err = testSmtpClient.Close(); err != nil {
 			return &res, errors.Wrapf(err, "can't close test smtp connection")
 		}
 	}
@@ -233,33 +235,30 @@ func (e *Email) autoFlush(ctx context.Context) {
 	}
 }
 
-// sendBuffer sends all collected messages to server, closing the connection after finishing.
-// In case Email.smtpClient is not initialised, establish connection using e.client().
-// Thread unsafe.
-func (e *Email) sendBuffer(ctx context.Context, sendBuffer []emailMessage) (err error) {
+// sendBuffer sends all collected messages to server in a new connection, closing the connection after finishing.
+// Thread safe.
+func (e *Email) sendBuffer(ctx context.Context, sendBuffer []emailMessage) error {
 	if len(sendBuffer) == 0 {
 		return nil
 	}
 
-	if e.smtpClient == nil {
-		e.smtpClient, err = e.client()
-		if err != nil {
-			return errors.Wrap(err, "failed to make smtp client")
-		}
+	smtpClient, err := e.client()
+	if err != nil {
+		return errors.Wrap(err, "failed to make smtp client")
 	}
 
 	errs := new(multierror.Error)
 
 	for _, m := range sendBuffer {
-		err := repeater.NewDefault(5, time.Millisecond*250).Do(ctx, func() error { return e.sendEmail(m) })
+		err := repeater.NewDefault(5, time.Millisecond*250).Do(ctx, func() error { return e.sendEmail(m, smtpClient) })
 		if err != nil {
 			errs = multierror.Append(errs, errors.Wrapf(err, "can't send message to %s", m.to))
 		}
 	}
 
-	if err := e.smtpClient.Quit(); err != nil {
+	if err := smtpClient.Quit(); err != nil {
 		log.Printf("[WARN] failed to send quit command to %s:%d, %v", e.Host, e.Port, err)
-		if err := e.smtpClient.Close(); err != nil {
+		if err := smtpClient.Close(); err != nil {
 			log.Printf("[WARN] can't close smtp connection, %v", err)
 			errs = multierror.Append(errs, err)
 		}
@@ -268,19 +267,19 @@ func (e *Email) sendBuffer(ctx context.Context, sendBuffer []emailMessage) (err 
 }
 
 // sendEmail sends message prepared by e.buildMessage to net/smtp.Client with established connection.
-// Thread unsafe.
-func (e *Email) sendEmail(m emailMessage) error {
-	if e.smtpClient == nil {
+// Thread safe.
+func (e *Email) sendEmail(m emailMessage, smtpClient smtpClient) error {
+	if smtpClient == nil {
 		return errors.New("sendEmail called without smtpClient set")
 	}
-	if err := e.smtpClient.Mail(e.From); err != nil {
+	if err := smtpClient.Mail(e.From); err != nil {
 		return errors.Wrapf(err, "bad from address %q", e.From)
 	}
-	if err := e.smtpClient.Rcpt(m.to); err != nil {
+	if err := smtpClient.Rcpt(m.to); err != nil {
 		return errors.Wrapf(err, "bad to address %q", m.to)
 	}
 
-	writer, err := e.smtpClient.Data()
+	writer, err := smtpClient.Data()
 	if err != nil {
 		return errors.Wrap(err, "can't make email writer")
 	}
@@ -340,8 +339,13 @@ func (e *Email) buildMessage(subject, body, to, contentType string) (message str
 	return message
 }
 
-// client establish connection with smtp server using credentials in e.EmailParams
-func (e *Email) client() (c *smtp.Client, err error) {
+// client establish connection with smtp server using credentials in e.EmailParams.
+// For test purposes return e.smtpClient if it's set.
+func (e *Email) client() (smtpClient, error) {
+	if e.smtpClient != nil {
+		return e.smtpClient, nil
+	}
+	var c *smtp.Client
 	srvAddress := fmt.Sprintf("%s:%d", e.Host, e.Port)
 	if e.TLS {
 		tlsConf := &tls.Config{

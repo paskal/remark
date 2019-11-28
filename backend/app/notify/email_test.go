@@ -297,7 +297,7 @@ func TestEmailSendBufferClientError(t *testing.T) {
 	assert.NoError(t, e.sendBuffer(context.Background(), []emailMessage{{}}), "",
 		"no error expected for e.sendBuffer with	 failed smtpClient.Quit but successful smtpClient.Close")
 	e.smtpClient = nil
-	assert.EqualError(t, e.sendEmail(emailMessage{}), "sendEmail called without smtpClient set",
+	assert.EqualError(t, e.sendEmail(emailMessage{}, e.smtpClient), "sendEmail called without smtpClient set",
 		"e.sendEmail called without smtpClient set returns error")
 }
 
