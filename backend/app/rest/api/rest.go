@@ -471,6 +471,7 @@ func addFileServer(r chi.Router, path string, root http.FileSystem, version stri
 		middleware.Timeout(10*time.Second),
 		cacheControl(time.Hour, version),
 	).Get(path, func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[DEBUG] addFileServer request for %s", r.URL)
 		// don't show dirs, just serve files
 		if strings.HasSuffix(r.URL.Path, "/") && len(r.URL.Path) > 1 && r.URL.Path != (origPath+"/") {
 			http.NotFound(w, r)
@@ -579,12 +580,16 @@ func cacheControl(expiration time.Duration, version string) func(http.Handler) h
 
 	return func(h http.Handler) http.Handler {
 		fn := func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("[DEBUG] cacheControl request for %s", r.URL)
+
 			e := `"` + etag(r, version) + `"`
 			w.Header().Set("Etag", e)
 			w.Header().Set("Cache-Control", "max-age="+strconv.Itoa(int(expiration.Seconds())))
 
 			if match := r.Header.Get("If-None-Match"); match != "" {
+				log.Printf("[DEBUG] If-None-Match check for %s", r.URL)
 				if strings.Contains(match, e) {
+					log.Printf("[DEBUG] cache hit for %v", r.URL)
 					w.WriteHeader(http.StatusNotModified)
 					return
 				}
